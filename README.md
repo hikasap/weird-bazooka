@@ -1,14 +1,15 @@
 # 3D Projectile Steering Demo
 
-This mini-game demonstrates a projectile that moves through 3D space with constant speed while the player steers by rotating the acceleration vector around the velocity direction. The result is a smooth, controllable arc that keeps speed and curvature radius predictable. The latest update adds an orbit camera, floating structures, and glowy gates so you can understand the surrounding space while carving ribbons through the air.
+This mini-game demonstrates a projectile that moves through 3D space with constant speed while the player steers by rotating the acceleration vector around the velocity direction. The result is a smooth, controllable arc that keeps speed and curvature radius predictable. The latest update adds swappable camera rigs plus a pointy projectile silhouette so you can instantly read heading while carving ribbons through the air.
 
 ## Features
 
 - Constant-speed motion (|v| is fixed)
 - Constant-magnitude acceleration that is always perpendicular to velocity
-- Orbit camera with yaw/pitch/zoom controls for exploring the world around the projectile
+- Multiple camera rigs: free-orbit (manual), chase (always behind the projectile), and a center-of-arena view you can cycle with **V**
 - Floating gates, crystalline beacons, neon floor grid, and pillars for spatial reference
 - Real-time visualization of trajectory, velocity, and acceleration vectors plus HUD metrics (speed, |a|, radius of curvature, |w|)
+- Pointy wireframe projectile that shows the current heading angle while still behaving like the classic glowing orb
 - Objective loop with glowing energy gates to chase, earn score, and set lap records
 - Lock-to-target mode (press **L**) that automatically steers the projectile toward the current gate
 - Cached geometry and a 120 FPS render loop for smoother flight and lower CPU overhead
@@ -32,7 +33,8 @@ Controls:
 - **W / S** – Tilt camera pitch
 - **Q / E** – Zoom in/out
 - **R / F** – Raise/lower camera height
-- **C** – Reset the camera to the default orbit
+- **C** – Reset the camera to the default orbit (also snaps back to Free view)
+- **V** – Cycle camera modes (Free → Chase → Center)
 - **L** – Toggle direction lock / target assist
 - **Space** – Clear the trail
 - **Esc / Window close** – Quit

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
+from enum import Enum, auto
 
 import numpy as np
 import pygame
@@ -14,6 +15,8 @@ WIDTH, HEIGHT = 1100, 720
 BACKGROUND_TOP = np.array([12, 18, 45])
 BACKGROUND_BOTTOM = np.array([3, 5, 15])
 TRAIL_COLOR = (120, 210, 255)
+PROJECTILE_CORE_COLOR = (255, 255, 255)
+PROJECTILE_FRAME_COLOR = (255, 180, 120)
 VELOCITY_COLOR = (255, 180, 90)
 ACCEL_COLOR = (120, 255, 160)
 GRID_COLOR = (40, 90, 130)
@@ -29,6 +32,19 @@ GRID_STEP = 80
 FPS_TARGET = 120
 FOCUS_OFFSET = np.array([0.0, 0.0, 30.0], dtype=np.float64)
 UNIT_Z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+
+class CameraMode(Enum):
+    FREE = auto()
+    CHASE = auto()
+    CENTER = auto()
+
+
+CAMERA_MODE_LABELS = {
+    CameraMode.FREE: "Free Orbit",
+    CameraMode.CHASE: "Chase",
+    CameraMode.CENTER: "Center",
+}
 
 
 def _unit_ring_points(segments: int) -> np.ndarray:
@@ -108,20 +124,76 @@ class Camera:
     pitch: float = math.radians(-25.0)
     height_offset: float = 140.0
     focus: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    mode: CameraMode = CameraMode.FREE
     _position: np.ndarray = field(init=False, default_factory=lambda: np.zeros(3))
     _right: np.ndarray = field(init=False, default_factory=lambda: np.array([1.0, 0.0, 0.0]))
     _up: np.ndarray = field(init=False, default_factory=lambda: np.array([0.0, 0.0, 1.0]))
     _forward: np.ndarray = field(init=False, default_factory=lambda: np.array([0.0, 0.0, -1.0]))
     _basis_ready: bool = field(init=False, default=False)
+    _override_position: np.ndarray | None = field(init=False, default=None)
 
-    def update_focus(self, target: np.ndarray, dt: float) -> None:
-        smoothing = 6.0
+    def update_focus(self, target: np.ndarray, dt: float, smoothing: float = 6.0) -> None:
         delta = (target - self.focus) * clamp(smoothing * dt, 0.0, 1.0)
         if np.linalg.norm(delta) > 1e-6:
             self.focus += delta
             self._basis_ready = False
 
+    def set_focus_direct(self, target: np.ndarray) -> None:
+        self.focus = target
+        self._basis_ready = False
+
+    def set_override_position(self, position: np.ndarray | None) -> None:
+        self._override_position = position
+        self._basis_ready = False
+
+    def clear_override(self) -> None:
+        if self._override_position is not None:
+            self._override_position = None
+            self._basis_ready = False
+
+    def set_mode(self, mode: CameraMode) -> None:
+        if self.mode == mode:
+            return
+        self.mode = mode
+        if self.mode == CameraMode.FREE:
+            self.clear_override()
+
+    def toggle_mode(self) -> None:
+        modes = list(CameraMode)
+        next_index = (modes.index(self.mode) + 1) % len(modes)
+        self.set_mode(modes[next_index])
+
+    def apply_chase_view(self, projectile: Projectile) -> None:
+        forward = normalize(projectile.state.velocity)
+        if magnitude(forward) < 1e-6:
+            forward = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        look_ahead = 60.0
+        desired_focus = projectile.state.position + forward * look_ahead
+        self.set_focus_direct(desired_focus)
+        follow_distance = 230.0
+        vertical_offset = 50.0
+        camera_position = desired_focus - forward * follow_distance + UNIT_Z * vertical_offset
+        self.set_override_position(camera_position)
+
+    def apply_center_view(self, projectile: Projectile, dt: float) -> None:
+        desired_focus = projectile.state.position
+        self.update_focus(desired_focus, dt, smoothing=4.0)
+        center_height = 320.0
+        center_position = np.array([0.0, 0.0, center_height], dtype=np.float64)
+        self.set_override_position(center_position)
+
+    def update_mode_view(self, projectile: Projectile, dt: float) -> None:
+        if self.mode == CameraMode.FREE:
+            self.clear_override()
+            self.update_focus(projectile.state.position + FOCUS_OFFSET, dt)
+        elif self.mode == CameraMode.CHASE:
+            self.apply_chase_view(projectile)
+        elif self.mode == CameraMode.CENTER:
+            self.apply_center_view(projectile, dt)
+
     def position(self) -> np.ndarray:
+        if self._override_position is not None:
+            return self._override_position
         x = self.focus[0] + self.radius * math.cos(self.pitch) * math.cos(self.yaw)
         y = self.focus[1] + self.radius * math.cos(self.pitch) * math.sin(self.yaw)
         z = self.focus[2] + self.radius * math.sin(self.pitch) + self.height_offset
@@ -207,6 +279,7 @@ class Camera:
             self._basis_ready = False
 
     def reset_view(self) -> None:
+        self.set_mode(CameraMode.FREE)
         self.yaw = math.radians(35.0)
         self.pitch = math.radians(-25.0)
         self.radius = 920.0
@@ -281,6 +354,7 @@ class CaptureFlash:
 @dataclass
 class ControlState:
     lock_direction: bool = False
+    camera_toggle_held: bool = False
 
 
 def build_background() -> pygame.Surface:
@@ -454,13 +528,49 @@ def draw_trail(surface: pygame.Surface, trail: deque[np.ndarray], camera: Camera
 
 
 def draw_projectile(surface: pygame.Surface, projectile: Projectile, camera: Camera) -> None:
-    projection = camera.project(projectile.state.position)
-    if not projection:
-        return
-    px, py, depth = projection
-    size = clamp(14_000 / depth, 8.0, 24.0)
-    pygame.draw.circle(surface, (255, 255, 255), (px, py), int(size))
-    pygame.draw.circle(surface, TRAIL_COLOR, (px, py), int(size * 1.6), 2)
+    position = projectile.state.position
+    forward = normalize(projectile.state.velocity)
+    if magnitude(forward) < 1e-6:
+        forward = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    right = np.cross(forward, UNIT_Z)
+    if magnitude(right) < 1e-6:
+        right = np.cross(forward, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+    right = normalize(right)
+    up = normalize(np.cross(right, forward))
+
+    length = 80.0
+    width = 26.0
+    thickness = 16.0
+
+    tip = position + forward * (length * 0.6)
+    tail = position - forward * (length * 0.4)
+    left = tail + right * (width * 0.5)
+    right_pt = tail - right * (width * 0.5)
+    top = tail + up * (thickness * 0.5)
+    bottom = tail - up * (thickness * 0.5)
+
+    frame_edges = [
+        (tail, tip),
+        (left, tip),
+        (right_pt, tip),
+        (top, tip),
+        (bottom, tip),
+        (left, right_pt),
+        (left, top),
+        (left, bottom),
+        (right_pt, top),
+        (right_pt, bottom),
+        (top, bottom),
+    ]
+    for start, end in frame_edges:
+        draw_line3d(surface, start, end, PROJECTILE_FRAME_COLOR, camera, 2, fade=False)
+
+    glow_proj = camera.project(position)
+    if glow_proj:
+        px, py, depth = glow_proj
+        size = clamp(10_000 / depth, 5.0, 18.0)
+        pygame.draw.circle(surface, PROJECTILE_CORE_COLOR, (px, py), int(size))
+        pygame.draw.circle(surface, TRAIL_COLOR, (px, py), int(size * 1.8), 1)
 
 
 def draw_vectors(surface: pygame.Surface, projectile: Projectile, camera: Camera) -> None:
@@ -489,6 +599,15 @@ def draw_hud(
         f"|w|: {magnitude(projectile.state.control_axis):.2f}",
         f"Cam r={camera.radius:.0f} pitch={math.degrees(camera.pitch):.1f}°",
     ]
+    hud_lines.extend(
+        [
+            "",
+            "Camera Modes & Shortcuts",
+            f"Mode: {CAMERA_MODE_LABELS[camera.mode]}",
+            "V – Cycle camera modes",
+            "Space – Clear ribbon trail",
+        ]
+    )
     if fps is not None:
         hud_lines.append(f"FPS: {fps:.0f}/{FPS_TARGET}")
     if control_state is not None:
@@ -519,7 +638,15 @@ def handle_keydown(
         camera.reset_view()
     if event.key == pygame.K_l:
         control_state.lock_direction = not control_state.lock_direction
+    if event.key == pygame.K_v and not control_state.camera_toggle_held:
+        camera.toggle_mode()
+        control_state.camera_toggle_held = True
     return True
+
+
+def handle_keyup(event: pygame.event.Event, control_state: ControlState) -> None:
+    if event.key == pygame.K_v:
+        control_state.camera_toggle_held = False
 
 
 def handle_events(trail: deque[np.ndarray], camera: Camera, control_state: ControlState) -> bool:
@@ -529,6 +656,8 @@ def handle_events(trail: deque[np.ndarray], camera: Camera, control_state: Contr
         if event.type == pygame.KEYDOWN:
             if not handle_keydown(event, trail, camera, control_state):
                 return False
+        if event.type == pygame.KEYUP:
+            handle_keyup(event, control_state)
     return True
 
 
@@ -610,8 +739,9 @@ def main() -> None:
         if not running:
             break
 
-        camera.handle_input(dt)
-        camera.update_focus(projectile.state.position + FOCUS_OFFSET, dt)
+        if camera.mode == CameraMode.FREE:
+            camera.handle_input(dt)
+        camera.update_mode_view(projectile, dt)
 
         rotation_input = rotation_input_from_keys(control_state, projectile, objective)
         projectile.rotate_acceleration(rotation_input, dt)

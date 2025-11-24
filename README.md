@@ -9,6 +9,8 @@ This mini-game demonstrates a projectile that moves through 3D space with consta
 - Orbit camera with yaw/pitch/zoom controls for exploring the world around the projectile
 - Floating gates, crystalline beacons, neon floor grid, and pillars for spatial reference
 - Real-time visualization of trajectory, velocity, and acceleration vectors plus HUD metrics (speed, |a|, radius of curvature, |w|)
+- Objective loop with glowing energy gates to chase, earn score, and set lap records
+- Lock-to-target mode (press **L**) that automatically steers the projectile toward the current gate
 
 ## Requirements
 
@@ -30,8 +32,13 @@ Controls:
 - **Q / E** – Zoom in/out
 - **R / F** – Raise/lower camera height
 - **C** – Reset the camera to the default orbit
+- **L** – Toggle direction lock / target assist
 - **Space** – Clear the trail
 - **Esc / Window close** – Quit
+
+## Objective
+
+Hunt the luminous target gates in order. Fly through the highlighted gate to bank points, then chase the next one. Clear all five gates to finish a lap—your score climbs, the arena respawns a fresh pattern, and the HUD records your lap time (with best-time tracking) so you can perfect your ribbon line. Need a hand? Toggle **L** to lock the controls so the projectile automatically steers toward the current gate while you focus on camera framing.
 
 ## Tests
 
@@ -45,7 +52,7 @@ python -m pytest
 
 - `projectile_game.vector_math` implements basic vector utilities and Rodrigues' rotation formula.
 - `projectile_game.simulation.Projectile` keeps the projectile speed constant, maintains a perpendicular acceleration of constant magnitude, and exposes `rotate_acceleration` for player control.
-- `game.py` runs a Pygame loop that samples input, updates the projectile, and renders its path with an interactive orbit camera, simple line-based models (rings, pillars, crystals), and perspective projection.
+- `game.py` runs a Pygame loop that samples input, updates the projectile, renders its path with an interactive orbit camera, simple line-based models (rings, pillars, crystals), and keeps track of the floating target sequence for scoring.
 
 At any instant:
 

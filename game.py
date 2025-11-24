@@ -20,6 +20,9 @@ GRID_COLOR = (40, 90, 130)
 PILLAR_COLOR = (60, 180, 200)
 RING_COLOR = (255, 120, 200)
 CRYSTAL_COLOR = (120, 255, 230)
+OBJECTIVE_ACTIVE_COLOR = (255, 220, 140)
+OBJECTIVE_INACTIVE_COLOR = (90, 120, 220)
+OBJECTIVE_FLASH_COLOR = (255, 200, 120)
 
 GRID_SIZE = 900
 GRID_STEP = 80
@@ -110,6 +113,75 @@ class Camera:
         self.height_offset = 140.0
 
 
+@dataclass
+class ObjectiveTracker:
+    capture_radius: float = 140.0
+    pattern_extent: float = 620.0
+    altitude_range: tuple[float, float] = (90.0, 420.0)
+    count: int = 5
+    rng: np.random.Generator = field(default_factory=lambda: np.random.default_rng(1337))
+    targets: list[np.ndarray] = field(default_factory=list)
+    current_index: int = 0
+    score: int = 0
+    laps: int = 0
+    lap_time: float = 0.0
+    best_lap: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.targets:
+            self.targets = self._generate_targets()
+
+    def _generate_targets(self) -> list[np.ndarray]:
+        positions: list[np.ndarray] = []
+        for _ in range(self.count):
+            radius = float(self.rng.uniform(220.0, self.pattern_extent))
+            angle = float(self.rng.uniform(0.0, math.tau))
+            altitude = float(self.rng.uniform(*self.altitude_range))
+            x = math.cos(angle) * radius
+            y = math.sin(angle) * radius
+            positions.append(np.array([x, y, altitude], dtype=np.float64))
+        return positions
+
+    @property
+    def current_target(self) -> np.ndarray:
+        return self.targets[self.current_index]
+
+    def advance_target(self) -> None:
+        self.current_index += 1
+        if self.current_index >= len(self.targets):
+            self.laps += 1
+            if self.best_lap is None or self.lap_time < self.best_lap:
+                self.best_lap = self.lap_time
+            self.targets = self._generate_targets()
+            self.current_index = 0
+            self.lap_time = 0.0
+
+    def update(self, position: np.ndarray, dt: float) -> np.ndarray | None:
+        self.lap_time += dt
+        target = self.current_target
+        if np.linalg.norm(position - target) <= self.capture_radius:
+            capture_point = target.copy()
+            self.score += 150 + int(25 * self.current_index)
+            self.advance_target()
+            return capture_point
+        return None
+
+
+@dataclass
+class CaptureFlash:
+    position: np.ndarray
+    age: float = 0.0
+    duration: float = 0.6
+
+    def progress(self) -> float:
+        return clamp(self.age / self.duration, 0.0, 1.0)
+
+
+@dataclass
+class ControlState:
+    lock_direction: bool = False
+
+
 def build_background() -> pygame.Surface:
     strip = pygame.Surface((1, HEIGHT))
     for y in range(HEIGHT):
@@ -195,7 +267,14 @@ def draw_pillars(surface: pygame.Surface, camera: Camera) -> None:
 GATE_LEVELS = [120.0, 260.0, 420.0]
 
 
-def draw_ring(surface: pygame.Surface, camera: Camera, center: np.ndarray, radius: float, segments: int = 48) -> None:
+def draw_ring(
+    surface: pygame.Surface,
+    camera: Camera,
+    center: np.ndarray,
+    radius: float,
+    color: tuple[int, int, int] = RING_COLOR,
+    segments: int = 48,
+) -> None:
     points = []
     for i in range(segments):
         angle = (i / segments) * math.tau
@@ -203,7 +282,7 @@ def draw_ring(surface: pygame.Surface, camera: Camera, center: np.ndarray, radiu
             center + np.array([math.cos(angle) * radius, math.sin(angle) * radius, 0.0])
         )
     for i in range(segments):
-        draw_line3d(surface, points[i], points[(i + 1) % segments], RING_COLOR, camera, 2)
+        draw_line3d(surface, points[i], points[(i + 1) % segments], color, camera, 2)
 
 
 def draw_rings(surface: pygame.Surface, camera: Camera) -> None:
@@ -247,6 +326,31 @@ def draw_crystals(surface: pygame.Surface, camera: Camera) -> None:
         draw_crystal(surface, camera, position + np.array([0.0, 0.0, wobble]))
 
 
+def draw_objective_targets(surface: pygame.Surface, camera: Camera, tracker: ObjectiveTracker) -> None:
+    for idx, target in enumerate(tracker.targets):
+        prominence = 1.0 if idx == tracker.current_index else 0.4
+        color = tuple(
+            int(OBJECTIVE_INACTIVE_COLOR[i] * (1 - prominence) + OBJECTIVE_ACTIVE_COLOR[i] * prominence)
+            for i in range(3)
+        )
+        ring_radius = 120.0 if idx == tracker.current_index else 90.0
+        draw_ring(surface, camera, target, ring_radius, color=color, segments=60)
+        draw_ring(surface, camera, target, ring_radius * 1.2, color=color, segments=60)
+        draw_line3d(surface, target, target - np.array([0.0, 0.0, target[2]]), color, camera, 1)
+
+
+def draw_capture_flashes(surface: pygame.Surface, camera: Camera, flashes: list[CaptureFlash]) -> None:
+    for flash in flashes:
+        t = flash.progress()
+        if t >= 1.0:
+            continue
+        glow_radius = 80.0 + 260.0 * t
+        pulse_color = tuple(
+            int(OBJECTIVE_FLASH_COLOR[i] * (1 - t * 0.5)) for i in range(3)
+        )
+        draw_ring(surface, camera, flash.position, glow_radius, color=pulse_color, segments=70)
+
+
 def draw_trail(surface: pygame.Surface, trail: deque[np.ndarray], camera: Camera) -> None:
     if len(trail) < 2:
         return
@@ -279,6 +383,8 @@ def draw_hud(
     projectile: Projectile,
     camera: Camera,
     font: pygame.font.Font,
+    objective: ObjectiveTracker | None = None,
+    control_state: ControlState | None = None,
 ) -> None:
     hud_lines = [
         "3D Projectile Steering",
@@ -289,25 +395,83 @@ def draw_hud(
         f"|w|: {magnitude(projectile.state.control_axis):.2f}",
         f"Cam r={camera.radius:.0f} pitch={math.degrees(camera.pitch):.1f}°",
     ]
+    if control_state is not None:
+        hud_lines.append(
+            f"Direction lock: {'ON' if control_state.lock_direction else 'OFF'} (L toggles)"
+        )
+    if objective:
+        best = f"{objective.best_lap:.1f}s" if objective.best_lap is not None else "--"
+        hud_lines.append(
+            f"Target {objective.current_index + 1}/{len(objective.targets)} | Score {objective.score} | Laps {objective.laps}"
+        )
+        hud_lines.append(f"Lap time {objective.lap_time:.1f}s | Best {best}")
     for idx, text in enumerate(hud_lines):
         surface.blit(font.render(text, True, (230, 235, 245)), (16, 16 + idx * 20))
 
 
-def handle_events(trail: deque[np.ndarray], camera: Camera) -> bool:
+def handle_keydown(
+    event: pygame.event.Event,
+    trail: deque[np.ndarray],
+    camera: Camera,
+    control_state: ControlState,
+) -> bool:
+    if event.key == pygame.K_ESCAPE:
+        return False
+    if event.key == pygame.K_SPACE:
+        trail.clear()
+    if event.key == pygame.K_c:
+        camera.reset_view()
+    if event.key == pygame.K_l:
+        control_state.lock_direction = not control_state.lock_direction
+    return True
+
+
+def handle_events(trail: deque[np.ndarray], camera: Camera, control_state: ControlState) -> bool:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             return False
         if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
+            if not handle_keydown(event, trail, camera, control_state):
                 return False
-            if event.key == pygame.K_SPACE:
-                trail.clear()
-            if event.key == pygame.K_c:
-                camera.reset_view()
     return True
 
 
-def rotation_input_from_keys() -> float:
+def automatic_rotation_input(
+    projectile: Projectile,
+    objective: ObjectiveTracker | None = None,
+) -> float:
+    if objective is None:
+        return 0.0
+    forward = normalize(projectile.state.velocity)
+    to_target = objective.current_target - projectile.state.position
+    distance = magnitude(to_target)
+    if distance < 1e-3:
+        return 0.0
+    to_target_dir = normalize(to_target)
+    desired_axis = np.cross(forward, to_target_dir)
+    axis_norm = magnitude(desired_axis)
+    if axis_norm < 1e-6:
+        return 0.0
+    desired_axis /= axis_norm
+    current_axis = projectile.state.control_axis
+    current_norm = magnitude(current_axis)
+    if current_norm < 1e-6:
+        return 0.0
+    current_axis = current_axis / current_norm
+    sin_term = np.dot(np.cross(current_axis, desired_axis), forward)
+    cos_term = clamp(np.dot(current_axis, desired_axis), -1.0, 1.0)
+    angle = math.atan2(sin_term, cos_term)
+    gain = 1.6
+    return clamp(angle * gain, -1.0, 1.0)
+
+
+def rotation_input_from_keys(
+    control_state: ControlState,
+    projectile: Projectile,
+    objective: ObjectiveTracker | None,
+) -> float:
+    if control_state.lock_direction:
+        return automatic_rotation_input(projectile, objective)
     keys = pygame.key.get_pressed()
     direction = 0.0
     if keys[pygame.K_LEFT]:
@@ -337,23 +501,33 @@ def main() -> None:
     trail: deque[np.ndarray] = deque(maxlen=config.trail_length)
     camera = Camera()
     camera.focus = projectile.state.position.copy()
+    objective = ObjectiveTracker()
+    capture_flashes: list[CaptureFlash] = []
+    control_state = ControlState()
 
     running = True
     while running:
         dt = clock.tick(60) / 1000.0
 
-        running = handle_events(trail, camera)
+        running = handle_events(trail, camera, control_state)
         if not running:
             break
 
         camera.handle_input(dt)
         camera.update_focus(projectile.state.position + np.array([0.0, 0.0, 30.0]), dt)
 
-        rotation_input = rotation_input_from_keys()
+        rotation_input = rotation_input_from_keys(control_state, projectile, objective)
         projectile.rotate_acceleration(rotation_input, dt)
         projectile.update(dt)
+        capture_point = objective.update(projectile.state.position, dt)
+        if capture_point is not None:
+            capture_flashes.append(CaptureFlash(position=capture_point))
 
         trail.append(projectile.state.position.copy())
+
+        for flash in capture_flashes:
+            flash.age += dt
+        capture_flashes[:] = [flash for flash in capture_flashes if flash.age < flash.duration]
 
         screen.blit(background, (0, 0))
         draw_floor_grid(screen, camera)
@@ -361,10 +535,12 @@ def main() -> None:
         draw_pillars(screen, camera)
         draw_rings(screen, camera)
         draw_crystals(screen, camera)
+        draw_objective_targets(screen, camera, objective)
+        draw_capture_flashes(screen, camera, capture_flashes)
         draw_trail(screen, trail, camera)
         draw_projectile(screen, projectile, camera)
         draw_vectors(screen, projectile, camera)
-        draw_hud(screen, projectile, camera, font)
+        draw_hud(screen, projectile, camera, font, objective, control_state)
 
         pygame.display.flip()
 
